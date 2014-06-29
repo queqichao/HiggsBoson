@@ -4,6 +4,9 @@ from re import *
 import random
 import math
 import svmutil
+import numpy as np
+import time
+from sklearn.ensemble import AdaBoostClassifier
 
 class Data:
     ids_ = []
@@ -104,3 +107,9 @@ def eval_one_param(gamma, c, data, partitions):
             preds[partitions[i][k]] = pred[k]
     return eval_AMS(preds, data.labels_, data.weights_)
 
+def eval_one_param_adaboost(lr, n, data):
+    ada_classifier = AdaBoostClassifier(learning_rate=lr, n_estimators=n, random_state=round(time.time()))
+    ada_classifier.fit(np.array(data.features_), np.array(data.labels_))
+    preds = ada_classifier.predict(np.array(data.features_))
+    return eval_AMS(preds.tolist(), data.labels_, data.weights_)
+    
