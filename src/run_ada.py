@@ -7,7 +7,7 @@ for lr in Lr:
   tmp = []
   Results.append('%.5f' % HiggsBosonCompetition.eval_one_param_adaboost(lr, 200, data));
 
-f = open('../data/res', 'w')
+f = open('../data/res_ada', 'w')
 
 f.write(' '.join(Results))
 
