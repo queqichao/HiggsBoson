@@ -39,6 +39,18 @@ def read_data(file_name):
             labels.append(-1)
     return Data(ids, features, labels, weights)
 
+def read_test_data(file_name):
+    ids = []
+    features = []
+    for line in open(file_name):
+        l = split(",", line[:-1])
+        ids.append(l[0])
+        feature = []
+        for f in l[1:]:
+            feature.append(float(f))
+        features.append(feature)
+    return Data(ids, features, [], [])
+
 def data_partition(n, k, seed=None):
     random.seed(seed)
     x = list(range(n))
@@ -107,9 +119,32 @@ def eval_one_param(gamma, c, data, partitions):
             preds[partitions[i][k]] = pred[k]
     return eval_AMS(preds, data.labels_, data.weights_)
 
-def eval_one_param_adaboost(lr, n, data):
+def train_adaboost(lr, n, data):
     ada_classifier = AdaBoostClassifier(learning_rate=lr, n_estimators=n, random_state=round(time.time()))
     ada_classifier.fit(np.array(data.features_), np.array(data.labels_))
+    return ada_classifier
+
+def eval_one_param_adaboost(lr, n, data):
+    ada_classifier = train_adaboost(lr, n, data)
     preds = ada_classifier.predict(np.array(data.features_))
     return eval_AMS(preds.tolist(), data.labels_, data.weights_)
-    
+
+def num2label(l):
+    if l==-1:
+        return 'b'
+    else:
+        return 's'
+
+def compute_result(lr, n, train_data, test_data, filename):
+    ada_classifier = train_adaboost(lr, n, train_data)
+    preds = ada_classifier.predict(np.array(test_data.features_)).tolist()
+    log_prob = ada_classifier.predict_log_proba(np.array(test_data.features_)).tolist()
+    rank = compute_rank([log_prob[j][1] for j in range(len(log_prob))])
+    rank = [r+1 for r in rank]
+    f = open(filename, 'w')
+    for i in range(len(preds)):
+        f.write('%s,%d,%s\n' % (test_data.ids_[i], rank[i], num2label(preds[i])))
+    f.close()
+
+def compute_rank(scores):
+    return [i[0] for i in sorted(enumerate(scores), key=lambda x:x[1])] 
