@@ -70,13 +70,45 @@ def data_partition(n, k, seed=None):
         
     return partitions
 
+def data_split(data, train_ratio, seed=None):
+    n = len(data.features_)
+    train_num = round(n*train_ratio)
+    random.seed(seed)
+    x = list(range(n))
+    random.shuffle(x)
+
+    train_ids = []
+    train_features = []
+    train_labels = []
+    train_weights = []
+    valid_ids = []
+    valid_features = []
+    valid_labels = []
+    valid_weights = []
+
+    for i in range(n):
+        if i<train_num:
+            train_ids.append(data.ids_[i])
+            train_features.append(data.features_[i])
+            train_labels.append(data.labels_[i])
+            train_weights.append(data.weights_[i])
+        else:
+            valid_ids.append(data.ids_[i])
+            valid_features.append(data.features_[i])
+            valid_labels.append(data.labels_[i])
+            valid_weights.append(data.weights_[i])
+
+    return Data(train_ids, train_features, train_labels, train_weights),Data(valid_ids, valid_features, valid_labels, valid_weights)
+
 def AMS(s, b):
     """ Approximate Median Significance defined as:
         AMS = sqrt(
                 2 { (s + b + b_r) log[1 + (s/(b+b_r))] - s}
               )        
     where b_r = 10, b = background, s = signal, log is natural logarithm """
-    
+   
+    assert s>=0
+    assert b>=0 
     br = 10.0
     radicand = 2 *( (s+b+br) * math.log (1.0 + s/(b+br)) -s)
     if radicand < 0:
@@ -85,18 +117,28 @@ def AMS(s, b):
     else:
         return math.sqrt(radicand)
 
-def eval_AMS(preds, labels, weights):
-    s = 0;
-    b = 0;
-    if len(preds) != len(labels):
-        print("Predicts and labels should be of the same length.")
-    for i in range(len(preds)):
-        if preds[i] == 1:
-            if labels[i] == -1:
-                b += weights[i]
+def optimize_AMS(sig_probs, labels, weights):
+    s = 0
+    b = 0
+    threshold = 0
+    for i in range(len(labels)):
+        if labels[i] == -1:
+            b += weights[i]
+        else:
+            s += weights[i]
+    rank = [i[0] for i in sorted(enumerate(sig_probs), key=lambda x:x[1])]
+ 
+    max_ams = AMS(s, b)
+    for i in range(len(labels)):
+        if i<len(labels)*0.9:
+            if labels[rank[i]] == -1:
+                b -= weights[rank[i]]
             else:
-                s += weights[i]
-    return AMS(s, b)
+                s -= weights[rank[i]]
+            if max_ams < AMS(s,b):
+                threshold = sig_probs[rank[i]]
+                max_ams = AMS(s,b)
+    return threshold, max_ams
 
 def eval_one_param(gamma, c, data, partitions):
     preds = data.labels_;
@@ -124,10 +166,13 @@ def train_adaboost(lr, n, data):
     ada_classifier.fit(np.array(data.features_), np.array(data.labels_))
     return ada_classifier
 
-def eval_one_param_adaboost(lr, n, data):
-    ada_classifier = train_adaboost(lr, n, data)
-    preds = ada_classifier.predict(np.array(data.features_))
-    return eval_AMS(preds.tolist(), data.labels_, data.weights_)
+def eval_one_param_adaboost(lr, n, train, valid):
+    ada_classifier = train_adaboost(lr, n, train)
+    probs = ada_classifier.predict_proba(np.array(valid.features_))
+    sig_probs = [probs[i][1] for i in range(len(probs))]
+    threshold, max_ams = optimize_AMS(sig_probs, valid.labels_, valid.weights_)
+   
+    return max_ams
 
 def num2label(l):
     if l==-1:
@@ -135,11 +180,26 @@ def num2label(l):
     else:
         return 's'
 
+def pred_adaboost(ada_classifier, test, threshold):
+    test_probs = ada_classifier.predict_proba(np.array(test.features_)).tolist()
+    test_sig_probs = [test_probs[i][1] for i in range(len(test_probs))]
+    preds = []
+    for x in test_sig_probs:
+        if x > threshold:
+            preds.append(1)
+        else:
+            preds.append(-1)
+    return preds,test_sig_probs
+
 def compute_result(lr, n, train_data, test_data, filename):
-    ada_classifier = train_adaboost(lr, n, train_data)
-    preds = ada_classifier.predict(np.array(test_data.features_)).tolist()
-    log_prob = ada_classifier.predict_log_proba(np.array(test_data.features_)).tolist()
-    rank = compute_rank([log_prob[j][1] for j in range(len(log_prob))])
+    train,valid = data_split(train_data, 0.9, time.time())
+    ada_classifier = train_adaboost(lr, n, train)
+    valid_probs = ada_classifier.predict_proba(np.array(valid.features_)).tolist()
+    sig_probs = [valid_probs[i][1] for i in range(len(valid_probs))]
+    threshold, max_ams = optimize_AMS(sig_probs, valid.labels_, valid.weights_)
+    preds,test_sig_probs = pred_adaboost(ada_classifier, test_data, threshold)
+    log_prob = [math.log(x) for x in test_sig_probs]
+    rank = compute_rank([log_prob[j] for j in range(len(log_prob))])
     rank = [r+1 for r in rank]
     f = open(filename, 'w')
     for i in range(len(preds)):
@@ -147,4 +207,5 @@ def compute_result(lr, n, train_data, test_data, filename):
     f.close()
 
 def compute_rank(scores):
-    return [i[0] for i in sorted(enumerate(scores), key=lambda x:x[1])] 
+    l = [i[0] for i in sorted(enumerate(scores), key=lambda x:x[1])]
+    return [i[0] for i in sorted(enumerate(l), key=lambda x:x[1])] 
