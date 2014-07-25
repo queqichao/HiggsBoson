@@ -7,17 +7,23 @@ import svmutil
 import numpy as np
 import time
 from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import AdaBoostRegressor
+from sklearn.gaussian_process import GaussianProcess
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.cross_validation import KFold
 
 class Data:
     ids_ = []
-    features_ = []
-    labels_ = []
+    features_ = np.array([])
+    labels_ = np.array([])
     weights_ = []
 
     def __init__(self, ids, features, labels, weights):
         self.ids_ = ids
-        self.features_ = features
-        self.labels_ = labels
+        self.features_ = np.array(features)
+        self.labels_ = np.array(labels)
         self.weights_ = weights
 
 def read_data(file_name):
@@ -38,6 +44,33 @@ def read_data(file_name):
         else:
             labels.append(-1)
     return Data(ids, features, labels, weights)
+
+def normalize_data(data, mins=[], maxs=[]):
+    dim = len(data.features_[0])
+    if len(mins)==0:
+        mins = np.array(data.features_[-1])
+        maxs = np.array(data.features_[-1])
+        for i in range(len(data.features_)-1):
+            for j in range(dim):
+                if mins[j] == -999.0:
+                    if data.features_[i][j] != -999.0:
+                        mins[j] = data.features_[i][j]
+                else:
+                    if data.features_[i][j] != -999.0 and data.features_[i][j] < mins[j]:
+                        mins[j] = data.features_[i][j]
+                if maxs[j] == -999.0:
+                    if data.features_[i][j] != -999.0:
+                        maxs[j] = data.features_[i][j]
+                else:
+                    if data.features_[i][j] != -999.0 and data.features_[i][j] > maxs[j]:
+                        maxs[j] = data.features_[i][j]
+    for i in range(len(data.features_)):
+        for j in range(dim):
+            if data.features_[i][j] == -999.0:
+                data.features_[i][j] = -1
+            else:
+                data.features_[i][j] = (data.features_[i][j]-mins[j])/(maxs[j]-mins[j])
+    return data, mins, maxs
 
 def read_test_data(file_name):
     ids = []
@@ -89,12 +122,12 @@ def data_split(data, train_ratio, seed=None):
     for i in range(n):
         if i<train_num:
             train_ids.append(data.ids_[i])
-            train_features.append(data.features_[i])
+            train_features.append(list(data.features_[i]))
             train_labels.append(data.labels_[i])
             train_weights.append(data.weights_[i])
         else:
             valid_ids.append(data.ids_[i])
-            valid_features.append(data.features_[i])
+            valid_features.append(list(data.features_[i]))
             valid_labels.append(data.labels_[i])
             valid_weights.append(data.weights_[i])
 
@@ -127,7 +160,7 @@ def optimize_AMS(sig_probs, labels, weights):
         else:
             s += weights[i]
     rank = [i[0] for i in sorted(enumerate(sig_probs), key=lambda x:x[1])]
- 
+    amss = [] 
     max_ams = AMS(s, b)
     for i in range(len(labels)):
         if i<len(labels)*0.9:
@@ -135,13 +168,14 @@ def optimize_AMS(sig_probs, labels, weights):
                 b -= weights[rank[i]]
             else:
                 s -= weights[rank[i]]
+            amss.append(AMS(s,b))
             if max_ams < AMS(s,b):
                 threshold = sig_probs[rank[i]]
                 max_ams = AMS(s,b)
-    return threshold, max_ams
+    return threshold, max_ams, amss
 
 def eval_one_param(gamma, c, data, partitions):
-    preds = data.labels_;
+    preds = list(data.labels_);
     for i in range(len(partitions)):
         training_data = []
         training_labels = []
@@ -150,10 +184,10 @@ def eval_one_param(gamma, c, data, partitions):
         for j in range(len(partitions)):
             for k in range(len(partitions[j])):
                 if j==i:
-                    testing_data.append(data.features_[partitions[j][k]])
+                    testing_data.append(list(data.features_[partitions[j][k]]))
                     testing_labels.append(data.labels_[partitions[j][k]])
                 else:
-                    training_data.append(data.features_[partitions[j][k]])
+                    training_data.append(list(data.features_[partitions[j][k]]))
                     training_labels.append(data.labels_[partitions[j][k]])
         m = svmutil.svm_train(training_labels, training_data, '-t 2 -c '+'%.4f' % c +' -g '+'%.4f' % gamma)
         (pred, p_acc, p_vals) = svmutil.svm_pred(testing_labels, testing_data, m)
@@ -161,18 +195,43 @@ def eval_one_param(gamma, c, data, partitions):
             preds[partitions[i][k]] = pred[k]
     return eval_AMS(preds, data.labels_, data.weights_)
 
-def train_adaboost(lr, n, data):
-    ada_classifier = AdaBoostClassifier(learning_rate=lr, n_estimators=n, random_state=round(time.time()))
-    ada_classifier.fit(np.array(data.features_), np.array(data.labels_))
-    return ada_classifier
+def train_boost(lr, n, features, labels, max_dep, boost_type):
+    if boost_type == 'AdaBoost':
+        classifier = AdaBoostClassifier(base_estimator=DecisionTreeClassifier(max_depth=max_dep), learning_rate=lr, n_estimators=n, random_state=round(time.time()))
+    elif boost_type == 'GradBoost':
+        classifier = GradientBoostingClassifier(learning_rate=lr, n_estimators=n, max_depth=max_dep, random_state=round(time.time()))
+    else:
+        raise NameError('Invalid boost_type')
+    classifier.fit(features, labels)
+    return classifier
 
-def eval_one_param_adaboost(lr, n, train, valid):
-    ada_classifier = train_adaboost(lr, n, train)
-    probs = ada_classifier.predict_proba(np.array(valid.features_))
-    sig_probs = [probs[i][1] for i in range(len(probs))]
-    threshold, max_ams = optimize_AMS(sig_probs, valid.labels_, valid.weights_)
+def train_gp(features, labels, nugget):
+    gp = GaussianProcess(corr='squared_exponential', theta0=1e-1, thetaL=1e-3, thetaU=1, nugget=nugget, random_start=round(time.time()))
+    gp.fit(features, labels)
+    return gp
+
+def eval_one_param_adaboost(lr, n, cv, data, max_dep, boost_type):
+    kf = KFold(len(data.features_), n_folds=cv, shuffle=True)
+    sig_probs = np.zeros(len(data.labels_))
+    for train,valid in kf:
+        ada_classifier = train_boost(lr, n, data.features_[train], data.labels_[train], max_dep, boost_type)
+        probs = ada_classifier.predict_proba(data.features_[valid])
+        sig_probs[valid] = [x[1] for x in probs]
+    threshold, max_ams, amss = optimize_AMS(sig_probs, data.labels_, data.weights_)
    
     return max_ams
+
+def eval_one_param_adaboost_reg(lr, n, cv, data, max_dep, boost_type):
+    kf = KFold(len(data.features_), n_folds=cv, shuffle=True)
+    sig_probs = np.zeros(len(data.labels_))
+    for train,valid in kf:
+        ada_classifier = train_boost_reg(lr, n, data.features_[train], data.weights_[train], max_dep, boost_type)
+        probs = ada_classifier.predict_proba(data.features_[valid])
+        sig_probs[valid] = [x[1] for x in probs]
+    threshold, max_ams, amss = optimize_AMS(sig_probs, data.labels_, data.weights_)
+   
+    return max_ams
+
 
 def num2label(l):
     if l==-1:
@@ -181,7 +240,7 @@ def num2label(l):
         return 's'
 
 def pred_adaboost(ada_classifier, test, threshold):
-    test_probs = ada_classifier.predict_proba(np.array(test.features_)).tolist()
+    test_probs = ada_classifier.predict_proba(test.features_).tolist()
     test_sig_probs = [test_probs[i][1] for i in range(len(test_probs))]
     preds = []
     for x in test_sig_probs:
@@ -191,12 +250,16 @@ def pred_adaboost(ada_classifier, test, threshold):
             preds.append(-1)
     return preds,test_sig_probs
 
-def compute_result(lr, n, train_data, test_data, filename):
-    train,valid = data_split(train_data, 0.9, time.time())
-    ada_classifier = train_adaboost(lr, n, train)
-    valid_probs = ada_classifier.predict_proba(np.array(valid.features_)).tolist()
-    sig_probs = [valid_probs[i][1] for i in range(len(valid_probs))]
-    threshold, max_ams = optimize_AMS(sig_probs, valid.labels_, valid.weights_)
+def compute_result(lr, n, cv, max_dep, boost_type, train_data, test_data, filename):
+    kf = KFold(len(train_data.features_), n_folds=cv, shuffle=True)
+    sig_probs = np.zeros(len(train_data.labels_))
+    for train,valid in kf:
+        ada_classifier = train_boost(lr, n, train_data.features_[train], train_data.labels_[train], max_dep, boost_type)
+        probs = ada_classifier.predict_proba(train_data.features_[valid])
+        sig_probs[valid] = [x[1] for x in probs]
+    threshold, max_ams, amss = optimize_AMS(sig_probs, train_data.labels_, train_data.weights_)
+
+    ada_classifier = train_boost(lr, n, train_data.features_, train_data.labels_, max_dep, boost_type) 
     preds,test_sig_probs = pred_adaboost(ada_classifier, test_data, threshold)
     log_prob = [math.log(x) for x in test_sig_probs]
     rank = compute_rank([log_prob[j] for j in range(len(log_prob))])
